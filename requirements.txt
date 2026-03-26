@@ -1,0 +1,22 @@
+# =============================================================================
+# DEPENDENCIAS DEL PROYECTO RAG - TEMARIOS UNIVERSITARIOS
+# =============================================================================
+# Instalar con: pip install -r requirements.txt
+# Compatible con Python 3.12+
+
+# --- Interfaz de usuario web ---
+streamlit                          # Framework para la interfaz gráfica interactiva
+
+# --- Procesamiento de documentos ---
+pypdf                              # Lectura y extracción de texto desde archivos PDF
+
+# --- Cliente de IA (compatible con OpenRouter y cualquier API OpenAI-compatible) ---
+openai                             # SDK de OpenAI — usado aquí para conectarse a OpenRouter
+
+# --- Embeddings y búsqueda semántica ---
+sentence-transformers              # Modelos de embeddings locales (sin costo de API)
+faiss-cpu                          # Biblioteca FAISS para búsqueda vectorial eficiente
+
+# --- Utilidades ---
+numpy                              # Operaciones numéricas y manejo de vectores
+python-dotenv                      # Carga de variables de entorno desde archivo .env

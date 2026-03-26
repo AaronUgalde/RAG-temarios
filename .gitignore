@@ -1,0 +1,22 @@
+# Variables de entorno (contienen claves secretas)
+.env
+
+# Índice vectorial generado (puede ser grande y se regenera automáticamente)
+vectorstore/
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Cache de Streamlit
+.streamlit/
+
+# Entornos virtuales
+venv/
+env/
+.conda/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
