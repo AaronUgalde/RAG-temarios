@@ -40,6 +40,7 @@ import os
 import pickle
 import numpy as np
 import faiss
+import httpx
 
 from typing import List, Dict, Any, Optional, Tuple
 from sentence_transformers import SentenceTransformer
@@ -100,6 +101,7 @@ class RAGEngine:
         self.client = OpenAI(
             base_url=self.OPENROUTER_BASE_URL,
             api_key=api_key,
+            http_client=httpx.Client(),
         )
         self.model = model
         self.top_k = top_k
