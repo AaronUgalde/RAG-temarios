@@ -1,31 +1,142 @@
-# RAG Temarios Universitarios
+# RAG Temarios Universitarios — v2
 
 Sistema de Retrieval-Augmented Generation (RAG) para consultar planes de estudio
 y temarios universitarios mediante lenguaje natural.
 
+La versión 2 incorpora búsqueda híbrida (BM25 + FAISS), re-ranking con cross-encoder,
+compresión de contexto y extracción de habilidades por LLM.
+
 ---
 
-## Descripcion del sistema
+## Arquitectura del sistema
 
-RAG es una arquitectura de inteligencia artificial que combina dos capacidades:
+```mermaid
+flowchart TD
+    subgraph UI["🖥️ Interfaz — app_v2.py (Streamlit)"]
+        A[Usuario] -->|Pregunta| B[Chat Panel]
+        B -->|Filtros: carrera / skill / domain / difficulty| C[Sidebar]
+        C -->|Pipeline mode: Full / Hybrid / Baseline| D[get_engine]
+    end
 
-**Recuperacion (Retrieval):** Ante una consulta del usuario, el sistema busca los
-fragmentos de texto mas relevantes dentro de los documentos indexados, utilizando
-busqueda semantica vectorial mediante FAISS y Sentence Transformers.
+    subgraph Engine["⚙️ RAGEngineV2 — rag_engine_v2.py"]
+        D --> E[query]
+        E --> F[retrieve]
+        F --> G["① Metadata Filter\n(carrera, skill, domain, difficulty)"]
+        G --> H{"use_hybrid?"}
+        H -->|Sí| I["② HybridSearchEngine\n(BM25 + FAISS → RRF)"]
+        H -->|No| J["② FAISS Search\n(solo vectores)"]
+        I --> K{"use_reranker?"}
+        J --> K
+        K -->|Sí| L["③ CrossEncoderReranker\n(cross-encoder/ms-marco)"]
+        K -->|No| M
+        L --> M{"use_compression?"}
+        M -->|Sí| N["④ ContextCompressor\n(sentence embeddings)"]
+        M -->|No| O
+        N --> O[Top-K Chunks enriquecidos]
+        O --> P[generate_response]
+        P -->|Prompt + contexto| Q["⑤ LLM via OpenRouter\n(GPT-4o-mini / Claude / etc.)"]
+        Q --> R[Respuesta final]
+        R --> B
+    end
 
-**Generacion (Generation):** Los fragmentos recuperados se inyectan como contexto
-en el prompt de un modelo de lenguaje (LLM), que genera una respuesta coherente,
-precisa y fundamentada en los documentos originales.
+    subgraph Indexing["📥 Indexación — DocumentLoader + build_index"]
+        S["PDFs\n(temarios/)"] --> T["DocumentLoader\n(document_loader.py)"]
+        T -->|Chunks texto| U{"extract_skills?"}
+        U -->|Sí| V["SkillExtractor\n(skills/extractor.py)"]
+        U -->|No| W
+        V -->|Metadatos| X["SkillsMetadataStore\n(skills/metadata_store.py)"]
+        V --> W["SentenceTransformer\nall-MiniLM-L6-v2"]
+        W -->|Embeddings| Y["FAISS Index\n(IndexFlatL2)"]
+        W -->|Corpus texto| Z["BM25 Index\n(retrieval/hybrid_search.py)"]
+        Y -->|vectorstore/faiss_index.bin| AA[(Disco)]
+        Z -->|en memoria| AA
+        X -->|vectorstore/skills_store.pkl| AA
+    end
 
-Flujo del sistema:
+    subgraph Eval["🧪 Evaluación — evaluation/"]
+        AB[run_evaluation.py] --> AC[runner.py]
+        AC --> AD[metrics.py]
+        AD --> AE[report.py]
+    end
+
+    AA -->|load_index| Engine
+```
+
+---
+
+## Descripción de componentes
+
+### `app_v2.py` — Interfaz web (Streamlit)
+
+Punto de entrada de la aplicación. Gestiona el estado de sesión, renderiza la
+barra lateral con filtros y el panel de chat. Permite elegir entre tres modos
+de pipeline (Full, Hybrid, Baseline) y lanzar la reindexación de documentos
+con o sin extracción de habilidades.
+
+### `rag_engine_v2.py` — Motor RAG
+
+Núcleo del sistema. Expone dos operaciones principales:
+
+- **`build_index(chunks)`** — Codifica los chunks con Sentence Transformers,
+  construye el índice FAISS y opcionalmente el índice BM25.
+- **`query(pregunta, filtros...)`** — Ejecuta el pipeline completo de recuperación
+  y generación para cada consulta del usuario.
+
+### `document_loader.py` — Carga de documentos
+
+Lee archivos PDF desde la carpeta `temarios/`, extrae el texto página a página
+con PyPDF y lo divide en chunks con solapamiento configurable (`CHUNK_SIZE`,
+`CHUNK_OVERLAP`). Infiere el nombre de la carrera a partir del nombre del archivo.
+
+### `retrieval/` — Módulos de recuperación avanzada
+
+| Módulo | Descripción |
+|---|---|
+| `hybrid_search.py` | Combina BM25 (léxico) y FAISS (semántico) mediante Reciprocal Rank Fusion (RRF) |
+| `reranker.py` | Re-ordena los candidatos usando un cross-encoder `ms-marco` (~80 MB, descarga en primer uso) |
+| `compressor.py` | Filtra oraciones irrelevantes dentro de cada chunk comparando embeddings con la query |
+
+### `skills/` — Extracción y gestión de habilidades
+
+| Módulo | Descripción |
+|---|---|
+| `extractor.py` | Llama al LLM para identificar habilidades, dominio y dificultad en cada chunk |
+| `metadata_store.py` | Persiste y consulta los metadatos de habilidades; expone filtros por dominio y dificultad |
+| `prompts.py` | Plantillas de prompts para la extracción de habilidades |
+
+### `evaluation/` — Framework de evaluación
+
+Permite medir la calidad del sistema con consultas de referencia (`eval_queries.jsonl`).
+Calcula métricas de recuperación y generación y produce un reporte.
+
+---
+
+## Pipeline de consulta (paso a paso)
 
 ```
-INDEXACION (una sola vez):
-PDF --> Texto --> Fragmentos (chunks) --> Embeddings --> Indice FAISS
-
-CONSULTA (por cada pregunta):
-Pregunta --> Embedding --> Busqueda FAISS --> Top-K Fragmentos
-         --> Prompt enriquecido --> LLM via OpenRouter --> Respuesta
+Pregunta del usuario
+        │
+        ▼
+① Metadata Filter ──► restringe los índices FAISS permitidos según
+                       carrera / skill / domain / difficulty
+        │
+        ▼
+② Retrieval ─────────► BM25 + FAISS → RRF  (o solo FAISS en modo Baseline)
+                        fetch_k = top_k × 4 candidatos
+        │
+        ▼
+③ Re-ranking ────────► cross-encoder puntúa cada par (query, chunk)
+                        reduce a top_k
+        │
+        ▼
+④ Compresión ────────► conserva solo oraciones relevantes por chunk
+                        reduce tokens enviados al LLM
+        │
+        ▼
+⑤ Generación ────────► LLM via OpenRouter con prompt académico en español
+        │
+        ▼
+      Respuesta + fuentes citadas
 ```
 
 ---
@@ -33,23 +144,42 @@ Pregunta --> Embedding --> Busqueda FAISS --> Top-K Fragmentos
 ## Estructura del proyecto
 
 ```
-RAG temarios/
-|-- app.py               Interfaz web (Streamlit). Punto de entrada.
-|-- rag_engine.py        Motor RAG: embeddings, FAISS y generacion via OpenRouter.
-|-- document_loader.py   Carga, extraccion y fragmentacion de archivos PDF.
-|-- requirements.txt     Dependencias del proyecto.
-|-- .env.example         Plantilla de configuracion de variables de entorno.
-|-- .gitignore
-|-- temarios/            Directorio donde se depositan los archivos PDF.
-|   `-- (archivos .pdf)
-`-- vectorstore/         Indice FAISS generado automaticamente (no subir a Git).
-    |-- faiss_index.bin
-    `-- chunks_metadata.pkl
+RAG-temarios/
+├── app.py                    Interfaz v1 (legacy, solo FAISS)
+├── app_v2.py                 Interfaz v2 — punto de entrada recomendado
+├── rag_engine.py             Motor RAG v1 (legacy)
+├── rag_engine_v2.py          Motor RAG v2 con pipeline completo
+├── document_loader.py        Carga y fragmentación de PDFs
+├── extract_skills.py         Script CLI para extracción de habilidades
+├── run_evaluation.py         Script CLI para evaluación del sistema
+├── requirements.txt          Dependencias v1
+├── requirements_v2.txt       Dependencias v2 (incluye BM25, cross-encoder)
+├── .env.example              Plantilla de variables de entorno
+├── temarios/                 PDFs de planes de estudio
+│   └── *.pdf
+├── vectorstore/              Índices generados (excluido de Git)
+│   ├── faiss_index.bin
+│   ├── chunks_metadata.pkl
+│   └── skills_store.pkl
+├── retrieval/
+│   ├── hybrid_search.py      BM25 + FAISS con RRF
+│   ├── reranker.py           Cross-encoder re-ranking
+│   └── compressor.py        Compresión de contexto por oraciones
+├── skills/
+│   ├── extractor.py          Extracción de habilidades via LLM
+│   ├── metadata_store.py     Almacén y filtros de metadatos
+│   └── prompts.py            Plantillas de prompts
+└── evaluation/
+    ├── dataset.py
+    ├── eval_queries.jsonl    Consultas de referencia
+    ├── metrics.py
+    ├── report.py
+    └── runner.py
 ```
 
 ---
 
-## Instalacion
+## Instalación
 
 ### Requisitos previos
 
@@ -59,11 +189,12 @@ RAG temarios/
 ### 1. Instalar dependencias
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements_v2.txt
 ```
 
-La primera ejecucion descarga el modelo de embeddings `all-MiniLM-L6-v2`
-(aproximadamente 90 MB). Este modelo se almacena en cache de forma local.
+La primera ejecución descarga:
+- Modelo de embeddings `all-MiniLM-L6-v2` (~90 MB)
+- Modelo cross-encoder para re-ranking (~80 MB, solo en primer uso)
 
 ### 2. Configurar variables de entorno
 
@@ -71,114 +202,109 @@ La primera ejecucion descarga el modelo de embeddings `all-MiniLM-L6-v2`
 copy .env.example .env
 ```
 
-Editar el archivo `.env` y completar los valores requeridos:
+Editar `.env` con los valores requeridos:
 
-```
+```env
 OPENROUTER_API_KEY=sk-or-v1-...
-OPENROUTER_MODEL=anthropic/claude-3-haiku
+OPENROUTER_MODEL=openai/gpt-4o-mini
+RAG_TOP_K=5
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=200
 ```
-
-La clave de API se obtiene en: https://openrouter.ai/keys
 
 ### 3. Agregar documentos
 
-Copiar los archivos PDF de temarios en la carpeta `temarios/`.
+Copiar los PDFs de temarios en la carpeta `temarios/`. El nombre de la carrera
+se infiere automáticamente del nombre del archivo.
 
-Convencion de nombres recomendada:
-
-```
-temarios/
-|-- temario_ingenieria_sistemas.pdf
-|-- temario_administracion_empresas.pdf
-`-- temario_medicina.pdf
-```
-
-El nombre de la carrera se infiere automaticamente a partir del nombre del archivo,
-eliminando prefijos comunes como "temario", "plan" o "programa".
-
-### 4. Ejecutar la aplicacion
+### 4. Ejecutar la aplicación
 
 ```bash
-streamlit run app.py
+streamlit run app_v2.py
 ```
 
-La aplicacion estara disponible en: http://localhost:8501
+Disponible en: http://localhost:8501
 
 ---
 
 ## Uso
 
-Al iniciar, el sistema intenta cargar un indice previamente construido desde el
-directorio `vectorstore/`. Si no existe, es necesario construirlo manualmente.
+Al iniciar, el sistema intenta cargar el índice desde `vectorstore/`. Si no existe,
+usar el botón **"Reindex documents"** en la barra lateral.
 
-**Para construir o reconstruir el indice:**
-Presionar el boton "Reindexar documentos" en la barra lateral. Este proceso
-lee todos los PDFs de la carpeta `temarios/`, extrae el texto, lo divide en
-fragmentos y genera los embeddings vectoriales.
+**Modos de pipeline (sidebar):**
 
-**Filtro por carrera:**
-Es posible restringir las consultas a una carrera especifica mediante el
-selector de la barra lateral. Si se selecciona "Todas las carreras", el
-sistema busca en todos los documentos indexados.
+| Modo | BM25+FAISS | Re-ranking | Compresión |
+|---|:---:|:---:|:---:|
+| Full (hybrid + rerank + compress) | ✅ | ✅ | ✅ |
+| Hybrid only | ✅ | ❌ | ❌ |
+| Baseline (FAISS only) | ❌ | ❌ | ❌ |
+
+**Filtros disponibles:**
+- **Carrera** — restringe la búsqueda a un programa académico específico
+- **Domain** — filtra por dominio de conocimiento (requiere extracción de skills)
+- **Difficulty** — filtra por nivel de dificultad del contenido
+- **Skill keyword** — búsqueda por habilidad específica (ej. `linear regression`)
 
 **Ejemplos de consultas:**
 
-- "Que materias de matematicas incluye la carrera de Ingenieria en Sistemas?"
-- "Cuantos semestres dura la carrera de Administracion de Empresas?"
-- "Compara las materias de programacion entre Sistemas y Ciencia de Datos."
-- "Que asignaturas optativas ofrece la carrera de Actuaria?"
+- "¿Qué materias de matemáticas incluye Ingeniería en Sistemas?"
+- "¿Cuántos semestres dura Administración de Empresas?"
+- "Compara las materias de programación entre Sistemas y Ciencia de Datos."
+- "¿Qué asignaturas optativas ofrece Actuaria?"
 
 ---
 
-## Modelos disponibles en OpenRouter
+## Extracción de habilidades (opcional)
 
-OpenRouter permite acceder a multiples modelos bajo una misma API.
-El modelo se configura en el archivo `.env` mediante la variable `OPENROUTER_MODEL`.
+La extracción de habilidades enriquece cada chunk con metadatos estructurados
+(habilidades, dominio, dificultad) usando el LLM. Es costosa en tokens pero se
+ejecuta solo una vez al indexar.
 
-Ejemplos de modelos disponibles:
+**Desde la interfaz:** activar el toggle *"Extract skills"* antes de pulsar
+*"Reindex documents"*.
 
-| Identificador                          | Descripcion                        |
-|----------------------------------------|------------------------------------|
-| `anthropic/claude-3-haiku`             | Rapido y economico                 |
-| `anthropic/claude-3.5-sonnet`          | Alta calidad de respuesta          |
-| `openai/gpt-4o-mini`                   | Equilibrado en costo y calidad     |
-| `google/gemini-flash-1.5`             | Muy rapido                         |
-| `meta-llama/llama-3.1-8b-instruct`    | Codigo abierto, con limite gratuito|
+**Desde línea de comandos:**
 
-Catalogo completo en: https://openrouter.ai/models
+```bash
+python extract_skills.py
+```
 
 ---
 
-## Tecnologias utilizadas
+## Tecnologías utilizadas
 
-| Componente              | Tecnologia                                  |
-|-------------------------|---------------------------------------------|
-| Interfaz web            | Streamlit                                   |
-| Modelo de lenguaje      | Cualquier LLM disponible via OpenRouter     |
-| Cliente de API          | SDK de OpenAI (compatible con OpenRouter)   |
-| Embeddings              | all-MiniLM-L6-v2 (Sentence Transformers)    |
-| Base de datos vectorial | FAISS (Facebook AI Similarity Search)       |
-| Lectura de PDFs         | PyPDF                                       |
+| Componente | Tecnología |
+|---|---|
+| Interfaz web | Streamlit |
+| Modelo de lenguaje | Cualquier LLM via OpenRouter |
+| Cliente de API | OpenAI SDK (compatible con OpenRouter) |
+| Embeddings | all-MiniLM-L6-v2 (Sentence Transformers) |
+| Índice vectorial | FAISS (Facebook AI Similarity Search) |
+| Búsqueda léxica | BM25 (rank_bm25) |
+| Re-ranking | cross-encoder/ms-marco-MiniLM-L-6-v2 |
+| Compresión | Sentence Transformers (cosine similarity) |
+| Lectura de PDFs | PyPDF |
 
 ---
 
-## Notas tecnicas
+## Notas técnicas
 
-**Embeddings:** Los embeddings son representaciones numericas del texto que
-capturan su significado semantico. Textos con significados similares producen
-vectores cercanos en el espacio vectorial, lo que permite busqueda por
-similitud de significado en lugar de coincidencia de palabras exactas.
+**Hybrid search (RRF):** La fusión BM25 + FAISS mediante Reciprocal Rank Fusion
+combina lo mejor de la búsqueda léxica (coincidencia exacta de términos) con la
+búsqueda semántica (significado del texto), mejorando la cobertura de recuperación.
 
-**Chunk overlap:** La superposicion entre fragmentos consecutivos garantiza
-que el contexto no se pierda en los bordes de cada fragmento. Con los valores
-por defecto (`CHUNK_SIZE=1000`, `CHUNK_OVERLAP=200`), cada fragmento comparte
-200 caracteres con el fragmento anterior y el siguiente.
+**Cross-encoder re-ranking:** A diferencia del bi-encoder usado para FAISS, el
+cross-encoder procesa la query y cada chunk juntos, produciendo scores de relevancia
+más precisos. Se aplica sobre los `top_k × 4` candidatos preliminares.
 
-**Persistencia del indice:** El indice FAISS y la metadata de fragmentos se
-guardan en disco al construirse. En ejecuciones posteriores se cargan
-directamente sin reprocesar los PDFs, lo que reduce el tiempo de inicio.
-Es necesario reconstruir el indice cada vez que se agreguen o modifiquen
-documentos en la carpeta `temarios/`.
+**Compresión de contexto:** Antes de enviar los chunks al LLM, el compresor elimina
+oraciones cuyo embedding sea poco similar al de la query. Reduce el uso de tokens
+y mejora la calidad de las respuestas al eliminar ruido.
 
-**Seguridad:** El archivo `.env` contiene la clave de API y no debe subirse
-a repositorios de codigo. El archivo `.gitignore` incluido ya lo excluye.
+**Persistencia del índice:** El índice FAISS, los metadatos de chunks y el store de
+habilidades se guardan en `vectorstore/`. Se cargan en ejecuciones posteriores sin
+reprocesar los PDFs. Reconstruir el índice al agregar o modificar documentos.
+
+**Seguridad:** El archivo `.env` contiene la clave de API y no debe subirse al
+repositorio. El `.gitignore` incluido ya lo excluye, junto con `vectorstore/`.
