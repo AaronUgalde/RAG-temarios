@@ -12,55 +12,50 @@ compresión de contexto y extracción de habilidades por LLM.
 
 ```mermaid
 flowchart TD
-    subgraph UI["🖥️ Interfaz — app_v2.py (Streamlit)"]
+    subgraph UI["Interfaz - app_v2.py (Streamlit)"]
         A[Usuario] -->|Pregunta| B[Chat Panel]
-        B -->|Filtros: carrera / skill / domain / difficulty| C[Sidebar]
-        C -->|Pipeline mode: Full / Hybrid / Baseline| D[get_engine]
+        B -->|Filtros| C[Sidebar]
+        C -->|Pipeline mode| D[get_engine]
     end
 
-    subgraph Engine["⚙️ RAGEngineV2 — rag_engine_v2.py"]
+    subgraph Engine["RAGEngineV2 - rag_engine_v2.py"]
         D --> E[query]
         E --> F[retrieve]
-        F --> G["① Metadata Filter\n(carrera, skill, domain, difficulty)"]
-        G --> H{"use_hybrid?"}
-        H -->|Sí| I["② HybridSearchEngine\n(BM25 + FAISS → RRF)"]
-        H -->|No| J["② FAISS Search\n(solo vectores)"]
-        I --> K{"use_reranker?"}
+        F --> G[Metadata Filter]
+        G --> H{use_hybrid?}
+        H -->|Si| I[HybridSearchEngine BM25 + FAISS]
+        H -->|No| J[FAISS Search]
+        I --> K{use_reranker?}
         J --> K
-        K -->|Sí| L["③ CrossEncoderReranker\n(cross-encoder/ms-marco)"]
+        K -->|Si| L[CrossEncoderReranker]
         K -->|No| M
-        L --> M{"use_compression?"}
-        M -->|Sí| N["④ ContextCompressor\n(sentence embeddings)"]
+        L --> M{use_compression?}
+        M -->|Si| N[ContextCompressor]
         M -->|No| O
-        N --> O[Top-K Chunks enriquecidos]
+        N --> O[Top-K Chunks]
         O --> P[generate_response]
-        P -->|Prompt + contexto| Q["⑤ LLM via OpenRouter\n(GPT-4o-mini / Claude / etc.)"]
+        P --> Q[LLM via OpenRouter]
         Q --> R[Respuesta final]
         R --> B
     end
 
-    subgraph Indexing["📥 Indexación — DocumentLoader + build_index"]
-        S["PDFs\n(temarios/)"] --> T["DocumentLoader\n(document_loader.py)"]
-        T -->|Chunks texto| U{"extract_skills?"}
-        U -->|Sí| V["SkillExtractor\n(skills/extractor.py)"]
+    subgraph Indexing["Indexacion"]
+        S[PDFs] --> T[DocumentLoader]
+        T --> U{extract_skills?}
+        U -->|Si| V[SkillExtractor]
         U -->|No| W
-        V -->|Metadatos| X["SkillsMetadataStore\n(skills/metadata_store.py)"]
-        V --> W["SentenceTransformer\nall-MiniLM-L6-v2"]
-        W -->|Embeddings| Y["FAISS Index\n(IndexFlatL2)"]
-        W -->|Corpus texto| Z["BM25 Index\n(retrieval/hybrid_search.py)"]
-        Y -->|vectorstore/faiss_index.bin| AA[(Disco)]
-        Z -->|en memoria| AA
-        X -->|vectorstore/skills_store.pkl| AA
-    end
-
-    subgraph Eval["🧪 Evaluación — evaluation/"]
-        AB[run_evaluation.py] --> AC[runner.py]
-        AC --> AD[metrics.py]
-        AD --> AE[report.py]
+        V --> X[SkillsMetadataStore]
+        V --> W[SentenceTransformer]
+        W --> Y[FAISS Index]
+        W --> Z[BM25 Index]
+        Y --> AA[(Disco)]
+        Z --> AA
+        X --> AA
     end
 
     AA -->|load_index| Engine
 ```
+
 
 ---
 
